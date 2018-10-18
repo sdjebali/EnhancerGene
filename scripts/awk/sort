@@ -1,0 +1,23 @@
+# awk script: sort BEDPE files
+# input: file BEDPE (chr, start, end, chr, start, end)
+# output: file BEDPE (chr, start, end, chr, start, end)
+# use: 'awk -f sort input_file > output_file'
+
+{
+if ($1==$4) { #If it is the same chromosome,
+	if ($2<$5){ #the interval which begin before is placed at first.
+		print $0
+		}
+	 else {
+		printf ("%s\t%d\t%d\t%s\t%d\t%d\n",$4,$5,$6,$1,$2,$3)
+		}
+	}
+else {
+	if ($1>$4) { #If it is not, the littler number is placed before.
+		printf ("%s\t%d\t%d\t%s\t%d\t%d\n",$4,$5,$6,$1,$2,$3)
+		}
+	else {
+		print $0
+		}
+	}
+}
