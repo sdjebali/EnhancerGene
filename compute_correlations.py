@@ -13,43 +13,21 @@ import warnings
 import scipy.stats as ss
 
 
-def eprint(*args, **kwargs):
+def eprint(message):
     ''' A simple to sys.stderr printer wrapper '''
-    print(*args, file=sys.stderr, **kwargs)
+    print(message, file=sys.stderr)
 
 
 def floats_to_str(values):
     return "\t".join(["%3.2f" % x for x in values])
 
-class FeatureSignal(object): #For each DHS.
-    """
-    FeatureSignal signal object store a functional element (feature) and
-    associated signal in different tissues or individuals
-    For each feature, mean and standard deviations are computed at initialization
-    The standard deviation can be computed for logs or for raw
-    logcounts and standard deviation.
-    """
-    def __init__(self, chrom, start, end, name, values, log=False):
+
+class GenomeFeature(object):
+    def __init__(self, chrom, start, end, name=None):
         self._chrom = chrom
-        self._start = int(start)
-        self._end = int(end)
+        self._start = start
+        self._end = end
         self._name = name
-        self.values = values
-        if log:
-            self.raw_x = self.log_values
-        else:
-            self.raw_x = self.values
-        self.mean = np.mean(self.raw_x)
-        self.sigma = np.std(self.raw_x)
-        self.x = np.array([i-self.mean for i in self.raw])/self.sigma
-
-    def __str__(self):
-        return ("%s\t%s\t%s\t%s" % (self.chrom, self.start, self.end,
-                                    self.name))
-
-    def __repr__(self):
-        return "%s:%s-%s\t%s\t%s" % (self._chrom, self._start, self._end,
-                                     self._id, floats_to_str(self.counts))
 
     @property
     def chrom(self):
@@ -61,11 +39,52 @@ class FeatureSignal(object): #For each DHS.
 
     @property
     def end(self):
-        return self._end
+            return self._end
 
     @property
     def name(self):
         return self._name
+
+    @property
+    def center(self):
+        return (self.start + self.end - 1)/2
+
+
+class FeatureSignal(GenomeFeature):
+    """
+    FeatureSignal signal object store a functional element (feature) and
+    associated signal in different tissues or individuals
+    For each feature, mean and standard deviations are computed at
+    initialization and the associated standardized value
+    The standard deviation can be computed for logs or for raw
+    logcounts and standard deviation.
+    """
+    def __init__(self, chrom, start, end, name, values, log=False):
+        super(FeatureSignal, self).__init__(chrom, start, end, name)
+        self.values = values
+        if log:
+            self.raw_x = self.log_values
+        else:
+            self.raw_x = self.values
+        self.mean = np.mean(self.raw_x)
+        self.sigma = np.std(self.raw_x, ddof=1)
+        self._std_values = np.array([i-self.mean for i in self.raw_x])/self.sigma
+
+    def __str__(self):
+        return ("%s\t%s\t%s\t%s" % (self.chrom, self.start, self.end,
+                                    self.name))
+
+    def __repr__(self):
+        return "%s:%s-%s\t%s\t%3.2f\t%3.2f\t%s" % (self.chrom, self.start, self.end,
+                                     self.name, self.sigma, self.mean, floats_to_str(self._std_values))
+
+    @property
+    def std(self):
+        return self.sigma
+
+    @property
+    def std_values(self):
+        return self._std_values
 
     @property
     def length(self):
@@ -95,104 +114,102 @@ class FeatureSignal(object): #For each DHS.
         """
         return [self.chrom, self.start, self.end]
 
-
-    def within_neighbourhood(self, dhs_interval, distance, calcul_distance):
+    def within_neighbourhood(self, right_candidate_fs, max_distance):
         """
-        Return True if DHS interval is within 500kb of self (the promoter)
+        Return True if featSig interval is within 500kb of self (the promoter)
         Param dhs_interval: vector [chrom,start,end] and distance (interger)
         Return: bolean value.
         """
-        if calcul_distance:
-            middle1 = self.start + (self.end-self.start)/2
-            middle2 = dhs_interval[1] + (dhs_interval[2]-dhs_interval[1])/2
-            if (self.chrom == dhs_interval[0] and
-                    (self.end < dhs_interval[1] and
-                     middle1+distance >= middle2)):
-                return True
-            else:
-                return False
+        pos1 = self.center
+        pos2 = right_candidate_fs.center
+        if pos2 < pos1:
+            eprint("The file seems to be unsorted. Exiting")
+            exit(1)
+        if (self.chrom == right_candidate_fs.chrom and
+                pos2 - pos1 <= max_distance):
+            return True
         else:
-            if (self.chrom == dhs_interval[0] and
-                    (self.end < dhs_interval[1] and
-                     self.end+distance >= dhs_interval[1])):
-                return True
-            else:
-                return False
+            return False
 
 
-def read_signal_file(dhs_file, chromosome="all"):
+def ValidEntry(chrom, start, end, values, num_signals):
+    if start < 0 or start >= end:
+        return False
+    if np.count_nonzero(values) == 0:
+        return False
+    if len(values) != num_signals:
+        return False
+    return True
+
+
+def read_signal_file(signal_file, chromosome="all", log_transform=False):
     """
     Read the signal file into an array of FeatureSignal objects fields
     File format
       chrom start end identifier s1 s2 ... sk
     """
     all_signals = []  # Vector with all the object DHS from file_dnase.
-    with open(dhs_file, "r") as f:
+    num_signals = 0
+    with open(signal_file, "r") as f:
         for line in f:
             if line.startswith("#"):
                 continue
             fields = line.rstrip().split("\t")
             chrom, start, end, identifier = fields[0:4]
+            if num_signals == 0:
+                num_signals = len(fields[4:])
             if chromosome != "all" and chrom != chromosome:
                 continue
             start = int(start)
             end = int(end)
-            counts = [float(c) for c in fields[4:]]
-            if start < 0 or start >= end:
-                print("Error: invalid feature positions %s %d %d. Exiting..."
-                      % (chrom, start, end), file=sys.stderr)
-                exit(1)
-            all_signals.append(FeatureSignal(chrom, start, end, identifier,
-                                             counts))
+            values = [float(c) for c in fields[4:]]
+            if not ValidEntry(chrom, start, end, values, num_signals):
+                eprint("Skipping \n%s\n not a valid or a meaningful entry" %
+                       line.rstrip())
+                continue
+            all_signals.append(FeatureSignal(chrom, int(start), int(end),
+                                             identifier, values,
+                                             log=log_transform))
 
     return all_signals
 
 
-def write_correlations(output, all_dhs):
+def write_correlations(correlations, all_values):
 
     header = "\t".join(["#chr", "start", "end", "ID",
                         "chr", "start", "end", "ID",
-                        "corr"])
+                        "pearson_r", "spearman_r"])
     print(header)
-    for i, j, corr in output:
-        dhs1 = all_dhs[i]
-        dhs2 = all_dhs[j]
-        print("%s\t%s\t%5.4f" % (dhs1, dhs2, corr))
+    for i, j, pea_r, spea_r in correlations:
+        fs1 = all_values[i]
+        fs2 = all_values[j]
+        print("%s\t%s\t%5.4f\t%5.4f" % (fs1, fs2, pea_r, spea_r))
 
 
-def arraytonumpy(all_dhs, method="pearson"):
+def arraytonumpy(all_values):
     """
-    Convert values from the class Dhs (logcounts and std) to numpy arrays for
+    Convert values from the class FeatureSignal to numpy arrays for
     multiprocessing.
     Param: the table with all the object.
-    Return: 3 numpy arrays : logcounts, std, ranks
+    Return: 2 numpy arrays : logcounts,ranks
     """
-    logcounts = []
-    stdeviation = []
+    values = []
     ranks = []
-    for i in all_dhs:
-        logcounts.append(i.log_counts_prime)
-        stdeviation.append(i.sigma)
-        if method == "spearman":
-            ranks.append(i.rangs)
-    return (np.array(logcounts), np.array(stdeviation), np.array(ranks))
+    for i in all_values:
+        values.append(i.std_values)
+        ranks.append(i.rangs)
+    return (np.array(values), np.array(ranks))
 
 
-def compute_correlation(logcounts, sigma, rank, i, j, mode="pearson"):
-        if mode == "pearson":
-            return pearsonr(logcounts[i], logcounts[j],
-                            sigma[i], sigma[j])
-        elif mode == "spearman":
-            return spearmanr(rank[i], rank[j])
-        else:
-            eprint("Unknown correlation method")
-            exit(1)
+def compute_correlation(values, rank, i, j):
+    pearson_r = pearsonr(values[i], values[j])
+    spearman_r = spearmanr(rank[i], rank[j])
+    # pearson_ss = ss.pearsonr(values[i], values[j])
+    return pearson_r, spearman_r
 
 
-def pearsonr(logcount_i, logcount_j, sigma_i, sigma_j):
-    numerator = np.dot(logcount_i, logcount_j)
-    coefP = numerator/(logcount_i.size*sigma_i*sigma_j)
-    return coefP
+def pearsonr(values_i, values_j):
+    return np.dot(values_i, values_j)/(len(values_i)-1)
 
 
 def spearmanr(rank_i, rank_j):
@@ -208,41 +225,36 @@ def parallel_correlations(args):
     Param: to_compute with the windows border index for each Dhs.
     Return: list of the correlation coefficient.
     """
-    start, end, mode = args
+    start, end = args
 
     # Warning is necessary because of the use of global variables
     # in parallelization mode
     with warnings.catch_warnings():
         warnings.simplefilter('ignore', RuntimeWarning)
-        logcounts = np.ctypeslib.as_array(logcounts_global)
-        sigma = np.ctypeslib.as_array(sigma_global)
+        values = np.ctypeslib.as_array(values_global)
         ranks = np.ctypeslib.as_array(ranks_global)
 
     correlations = []
     i = start
     for j in range(start+1, end+1):
-        r = compute_correlation(logcounts, sigma, ranks,  i, j, mode)
-        correlations.append(((i, j), r))
+        pear_r, spea_r = compute_correlation(values, ranks,  i, j)
+        correlations.append(((i, j), (pear_r, spea_r)))
 
     return correlations
 
 
-def _init_parallel(logcounts_to_populate, sigma_to_populate,
-                   ranks_to_populate):
+def _init_parallel(values_to_populate, ranks_to_populate):
     """
     Each pool process calls this initializer.
     Load the arrays to be populated into that process's global namespace
     """
-    global logcounts_global
-    global sigma_global
+    global values_global
     global ranks_global
-    logcounts_global = logcounts_to_populate
-    sigma_global = sigma_to_populate
+    values_global = values_to_populate
     ranks_global = ranks_to_populate
 
 
-def parallel_computation(logcounts, sigma, ranks, to_compute,
-                         threads=1):
+def parallel_computation(values, ranks, to_compute, threads=1):
     """
     Create shared variables and pool for multiprocessing.
     Params: logcounts and sigma numpy array, to_compute list with the index and
@@ -251,23 +263,21 @@ def parallel_computation(logcounts, sigma, ranks, to_compute,
     """
     # Define the corresponding shared ctype arrays
     # Create ctypes object from numpy array
-    tmp_logcounts = np.ctypeslib.as_ctypes(logcounts)
-    shared_logcounts = sharedctypes.Array(tmp_logcounts._type_, tmp_logcounts,
-                                          lock=False)
+    tmp_values = np.ctypeslib.as_ctypes(values)
+    shared_values = sharedctypes.Array(tmp_values._type_, tmp_values,
+                                       lock=False)
     #     Returns a ctypes array allocated from shared memory.
     #     tmp_dhs._type_: type of the returned array elements
     #     tmp_dhs: initialize the array
     #     lock=True (default): synchronize access to the value
     #     lock=False: access to returned object not protected
 
-    tmp_sigma = np.ctypeslib.as_ctypes(sigma)
-    shared_sigma = sharedctypes.Array(tmp_sigma._type_, tmp_sigma, lock=False)
-
     tmp_ranks = np.ctypeslib.as_ctypes(ranks)
-    shared_ranks = sharedctypes.Array(tmp_ranks._type_, tmp_ranks, lock=False)
+    shared_ranks = sharedctypes.Array(tmp_ranks._type_, tmp_ranks,
+                                      lock=False)
 
     pool = Pool(processes=threads, initializer=_init_parallel,
-                initargs=(shared_logcounts, shared_sigma, shared_ranks, ))
+                initargs=(shared_values, shared_ranks, ))
     #                       controls a pool of worker processes
     #                       processes: number of worker processes to use
     #                       initializer is not None: each worker process will
@@ -292,34 +302,33 @@ def sort_correlations(correlations, all_dhs):
     for cor in sorted(correlations,  key=lambda x: (x[0][0], x[0][1])):
         pair, r = cor
         i, j = pair
-        results.append((i, j, r))
+        pear_r, spea_r = r
+        results.append((i, j, pear_r, spea_r))
     return results
 
 
-def get_pairs_tocompare(all_dhs, distance, calcul_distance, method="pearson"):
+def get_pairs_tocompare(all_values,  max_distance):
     """
     Identify the paris verifying the distance constraints hence the pairs
     for whixh a correlation will be computed
     """
     to_compute = []
-    for i in range(len(all_dhs)-1):
+    for i in range(len(all_values)-1):
         right_border = i+1
-        while all_dhs[i].within_neighbourhood(all_dhs[right_border].interval,
-                                              distance, calcul_distance):
+        while all_values[i].within_neighbourhood(all_values[right_border],
+                                                 max_distance):
             right_border += 1
-            if right_border == len(all_dhs):
+            if right_border == len(all_values):
                 break
         # For each peak, we compute correlation with all
         # the peaks in this window.
-        to_compute.append([i, right_border-1, method])
+        to_compute.append([i, right_border-1])
     return to_compute
 
 
-def compute_all_correlations(all_dhs, to_compute, calcul_distance,
-                             distance=500000, method="pearson", threads=1):
-    (logcounts, sigma, ranks) = arraytonumpy(all_dhs, method=method)
-    output = parallel_computation(logcounts, sigma, ranks,
-                                  to_compute, threads=threads)
+def compute_all_correlations(all_values, to_compute, threads=1):
+    (values, ranks) = arraytonumpy(all_values)
+    output = parallel_computation(values, ranks, to_compute, threads=threads)
     return output
 
 
@@ -331,49 +340,49 @@ if __name__ == '__main__':
                                "\nWarning, the file has to be sorted "
                                "(using sort -k1,1 -k2,2n)",
                                formatter_class=ap.RawTextHelpFormatter)
-    parser.add_argument("file_dnase", help="file with the read count per peak")
-    parser.add_argument("-c", "--chrom", help="if you want to compute only on \n"
-                        "a single chromosome.", default="all", type=str)
-    parser.add_argument("-d", "--distance", help="distance maximum between peaks \n"
-                        "to compute the correlation. (default:500000)",
+    parser.add_argument("signal_file", help="file with the feature signals")
+    parser.add_argument("-c", "--chrom",
+                        help="a single chromosome (default:all chromosomes)",
+                        default="all", type=str)
+    parser.add_argument("-d", "--distance", dest='max_distance',
+                        help="maximum distance between features "
+                        "for correlation computation (default:500000)",
                         default=500000, type=int)
-    parser.add_argument("-l", "--length", help="how to calcul the distance between \n"
-                        "two peaks, if actif distance compute between middle of \n"
-                        "each peaks. (default: start-end)", action="store_true") #nom a revoir
-    parser.add_argument("-m", "--method", help="correlation ncoefficient,\n"
-                        "pearson or spearman. (default:pearson)",
-                        default="pearson", type=str)
-    parser.add_argument("-t", "--threads", help="number of prcessors\
-                         (default:1)",
+    parser.add_argument("-l", "--log-transformed", dest='log_transform',
+                        help="log transform the data (default:False)",
+                        action="store_true")
+    parser.add_argument("-t", "--threads", help="number of prcessors"
+                        " (default:1)",
                         default=1, type=int)
     args = parser.parse_args()
 
-    dnase_file = args.file_dnase
-    distance = args.distance
-    threads = args.threads
+    signal_file = args.signal_file
     chrom = args.chrom
-    method = args.method
-    calcul_distance = args.length
+    max_distance = args.max_distance
+    log_transform = args.log_transform
+    threads = args.threads
 
-    eprint("Reading dhs file")
-    all_feture_signals = read_signal_file(dnase_file, chrom)
-    eprint("%d peaks loaded" % (len(all_dhs)))
+    eprint("Reading signal file")
+    all_feature_signals = read_signal_file(signal_file, chrom, log_transform)
+    eprint("%d peaks loaded" % (len(all_feature_signals)))
 
-    # for debug only
-    for fs in all_feture_signals:
-        print(repr(fs))
-    exit(1)
+    # debug
+    # for fs in all_feature_signals:
+    #        print(repr(fs))
 
     eprint("Identifying correlation pairs to compute")
-    to_compute = get_pairs_tocompare(all_dhs, distance, calcul_distance)
+    to_compute = get_pairs_tocompare(all_feature_signals, max_distance)
+
+    # for tc in to_compute:
+    # print(tc)
+    # exit(1)
 
     eprint("Computing the correlations")
-    output = compute_all_correlations(all_dhs, to_compute, calcul_distance,
-                                      distance=distance, method=method,
+    output = compute_all_correlations(all_feature_signals, to_compute,
                                       threads=threads)
 
     eprint("Sorting the correlations")
-    sorted_correlations = sort_correlations(output, all_dhs)
+    sorted_correlations = sort_correlations(output, all_feature_signals)
 
     eprint("Writing the correlations")
-    write_correlations(sorted_correlations, all_dhs)
+    write_correlations(sorted_correlations, all_feature_signals)
