@@ -366,16 +366,8 @@ if __name__ == '__main__':
     all_feature_signals = read_signal_file(signal_file, chrom, log_transform)
     eprint("%d peaks loaded" % (len(all_feature_signals)))
 
-    # debug
-    # for fs in all_feature_signals:
-    #        print(repr(fs))
-
     eprint("Identifying correlation pairs to compute")
     to_compute = get_pairs_tocompare(all_feature_signals, max_distance)
-
-    # for tc in to_compute:
-    # print(tc)
-    # exit(1)
 
     eprint("Computing the correlations")
     output = compute_all_correlations(all_feature_signals, to_compute,
