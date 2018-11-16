@@ -59,8 +59,9 @@ class FeatureSignal(GenomeFeature):
     The standard deviation can be computed for logs or for raw
     logcounts and standard deviation.
     """
-    def __init__(self, chrom, start, end, name, values, log=False):
+    def __init__(self, chrom, start, end, name, values, group="A", log=False):
         super(FeatureSignal, self).__init__(chrom, start, end, name)
+        self._group = group
         self.values = values
         if log:
             self.raw_x = self.log_values
@@ -68,6 +69,9 @@ class FeatureSignal(GenomeFeature):
             self.raw_x = self.values
         self.mean = np.mean(self.raw_x)
         self.sigma = np.std(self.raw_x, ddof=1)
+        # if self.sigma == 0:
+        #     self._std_values = None
+        # else:
         self._std_values = np.array([i-self.mean for i in self.raw_x])/self.sigma
 
     def __str__(self):
@@ -75,8 +79,18 @@ class FeatureSignal(GenomeFeature):
                                     self.name))
 
     def __repr__(self):
-        return "%s:%s-%s\t%s\t%3.2f\t%3.2f\t%s" % (self.chrom, self.start, self.end,
-                                     self.name, self.sigma, self.mean, floats_to_str(self._std_values))
+        if self._std_values is None:
+            values = [float('nan')] * self.length
+        else:
+            values = self._std_values
+        return "%s:%s-%s\t%s\t%3.2f\t%3.2f\t%s" % (self.chrom, self.start,
+                                                   self.end, self.name,
+                                                   self.sigma, self.mean,
+                                                   floats_to_str(values))
+
+    @property
+    def group(self):
+        return self._group
 
     @property
     def std(self):
@@ -91,7 +105,7 @@ class FeatureSignal(GenomeFeature):
         """
         Return the length of the counts vector.
         """
-        return (len(self.counts))
+        return (len(self.values))
 
     @property
     def log_values(self):
@@ -122,8 +136,12 @@ class FeatureSignal(GenomeFeature):
         """
         pos1 = self.center
         pos2 = right_candidate_fs.center
-        if pos2 < pos1:
-            eprint("The file seems to be unsorted. Exiting")
+        if (self.chrom == right_candidate_fs.chrom and
+                self.start > right_candidate_fs.start):
+            eprint("The file seems to be unsorted:")
+            eprint(self)
+            eprint(right_candidate_fs)
+            eprint("Exiting")
             exit(1)
         if (self.chrom == right_candidate_fs.chrom and
                 pos2 - pos1 <= max_distance):
@@ -137,12 +155,15 @@ def ValidEntry(chrom, start, end, values, num_signals):
         return False
     if np.count_nonzero(values) == 0:
         return False
+    if np.std(values, ddof=1) == 0:
+        return False
     if len(values) != num_signals:
         return False
     return True
 
 
-def read_signal_file(signal_file, chromosome="all", log_transform=False):
+def read_signal_file(signal_file, chromosome="all", log_transform=False,
+                     group="A"):
     """
     Read the signal file into an array of FeatureSignal objects fields
     File format
@@ -164,12 +185,12 @@ def read_signal_file(signal_file, chromosome="all", log_transform=False):
             end = int(end)
             values = [float(c) for c in fields[4:]]
             if not ValidEntry(chrom, start, end, values, num_signals):
-                eprint("Skipping \n%s\n not a valid or a meaningful entry" %
+                eprint("Skipping \n%s\nNot a valid or a useful entry" %
                        line.rstrip())
                 continue
             all_signals.append(FeatureSignal(chrom, int(start), int(end),
                                              identifier, values,
-                                             log=log_transform))
+                                             log=log_transform, group=group))
 
     return all_signals
 
@@ -307,11 +328,19 @@ def sort_correlations(correlations, all_dhs):
     return results
 
 
-def get_pairs_tocompare(all_values,  max_distance):
+def _within_neighborhood(all_values_A, all_values_B,
+                         max_distance=500000, mode="all2all"):
     """
-    Identify the paris verifying the distance constraints hence the pairs
+    Identify the pairs verifying the distance constraints hence the pairs
     for whixh a correlation will be computed
     """
+    all_values = all_values_A
+    # merge all values in a single array
+    if all_values_B is not None:
+        all_values.extend(all_values_B)
+    # sort all values in place
+    all_values.sort(key=lambda x: (x.chrom, x.start))
+
     to_compute = []
     for i in range(len(all_values)-1):
         right_border = i+1
@@ -323,6 +352,40 @@ def get_pairs_tocompare(all_values,  max_distance):
         # For each peak, we compute correlation with all
         # the peaks in this window.
         to_compute.append([i, right_border-1])
+    return to_compute, all_values
+
+
+def _peer2peer(all_values_A, all_values_B):
+    if all_values_B is None:
+        eprint("Impossible line by line comparison without B values")
+        exit(1)
+    if len(all_values_A) != len(all_values_B):
+        eprint("Impossible line by line comparison when the two files "
+               "differ in the number of valid lines")
+        exit(1)
+    all_values = []
+    to_compute = []
+    for i, a, b in zip(range(0, len(all_values_A)),
+                       all_values_A, all_values_B):
+        all_values.extend([a, b])
+        to_compute.append([2*i, 2*i+1])
+    return to_compute, all_values
+
+
+def get_pairs_tocompare(all_values, all_values_B,
+                        max_distance=500000, mode="all2all"):
+    """
+    Identify the pairs verifying the distance constraints hence the pairs
+    for whixh a correlation will be computed
+    """
+    to_compute = []
+
+    if mode == "all2all" or mode == "A2B":
+        to_compute = _within_neighborhood(all_values, all_values_B,
+                                          max_distance=max_distance, mode=mode)
+    elif mode == "L2L":
+        to_compute = _peer2peer(all_values, all_values_B)
+
     return to_compute
 
 
@@ -340,7 +403,10 @@ if __name__ == '__main__':
                                "\nWarning, the file has to be sorted "
                                "(using sort -k1,1 -k2,2n)",
                                formatter_class=ap.RawTextHelpFormatter)
-    parser.add_argument("signal_file", help="file with the feature signals")
+    parser.add_argument("-a", dest="signal_file", required=True,
+                        help="file with the feature signals")
+    parser.add_argument("-b", dest="signal_file_B", default=None,
+                        help="optionnal second file with the feature signals")
     parser.add_argument("-c", "--chrom",
                         help="a single chromosome (default:all chromosomes)",
                         default="all", type=str)
@@ -351,6 +417,11 @@ if __name__ == '__main__':
     parser.add_argument("-l", "--log-transformed", dest='log_transform',
                         help="log transform the data (default:False)",
                         action="store_true")
+    parser.add_argument("-m", "--mode",
+                        help="mode of comparison all to all (all2all), "
+                             "file a to file b (A2B), line pairs (L2L) "
+                             "(default:all2all)",
+                        default="all2all", type=str)
     parser.add_argument("-t", "--threads", help="number of prcessors"
                         " (default:1)",
                         default=1, type=int)
@@ -360,16 +431,28 @@ if __name__ == '__main__':
     chrom = args.chrom
     max_distance = args.max_distance
     log_transform = args.log_transform
+    mode = args.mode
     threads = args.threads
 
     eprint("Reading signal file")
     all_feature_signals = read_signal_file(signal_file, chrom, log_transform)
-    eprint("%d peaks loaded" % (len(all_feature_signals)))
+    eprint("%d peaks loaded from file" % (len(all_feature_signals)))
+
+    if args.signal_file_B:
+        eprint("Reading second signal file")
+        signal_file_B = args.signal_file_B
+        all_feature_signals_B = read_signal_file(signal_file_B, chrom,
+                                                 log_transform, group="B")
+        eprint("%d peaks loaded from second file " % (len(all_feature_signals_B)))
+    else:
+        all_feature_signals_B = None
 
     eprint("Identifying correlation pairs to compute")
-    to_compute = get_pairs_tocompare(all_feature_signals, max_distance)
+    to_compute, all_feature_signals = get_pairs_tocompare(all_feature_signals, all_feature_signals_B,
+                                     max_distance=max_distance, mode=mode)
 
-    eprint("Computing the correlations")
+    #eprint("Computing %d correlations" % len(to_compute))
+    eprint("Computing correlations")
     output = compute_all_correlations(all_feature_signals, to_compute,
                                       threads=threads)
 
