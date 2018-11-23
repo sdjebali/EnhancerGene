@@ -1,13 +1,16 @@
-# Compute the Pearson correlation coefficient between the promoter and
-# all DHS peak within less than 500kb.
+# Compute pearson and spearman correlation coefficient between
+# feature signals (Dnase, ...)
 # Usage:
-# python compute_correlations.py [-p prom_file.bed] [-d 500000] DNase_DHS.bed
-# CPU = 8 by default
+# python compute_correlations.py [-d 500000] [-c 10] feature_signals.bdelike
+#
 
 import argparse as ap
 from math import log10
 import numpy as np
 import sys
+import os
+import tempfile
+import itertools
 from multiprocessing import Pool, sharedctypes
 import warnings
 import scipy.stats as ss
@@ -23,6 +26,10 @@ def floats_to_str(values):
 
 
 class GenomeFeature(object):
+    """
+    An object storing a genome feature (an annotation): chrom, start, end
+    and a name
+    """
     def __init__(self, chrom, start, end, name=None):
         self._chrom = chrom
         self._start = start
@@ -58,6 +65,8 @@ class FeatureSignal(GenomeFeature):
     initialization and the associated standardized value
     The standard deviation can be computed for logs or for raw
     logcounts and standard deviation.
+
+    group enables to sore in a single array signals from different sources
     """
     def __init__(self, chrom, start, end, name, values, group="A", log=False):
         super(FeatureSignal, self).__init__(chrom, start, end, name)
@@ -69,9 +78,6 @@ class FeatureSignal(GenomeFeature):
             self.raw_x = self.values
         self.mean = np.mean(self.raw_x)
         self.sigma = np.std(self.raw_x, ddof=1)
-        # if self.sigma == 0:
-        #     self._std_values = None
-        # else:
         self._std_values = np.array([i-self.mean for i in self.raw_x])/self.sigma
 
     def __str__(self):
@@ -130,8 +136,8 @@ class FeatureSignal(GenomeFeature):
 
     def within_neighbourhood(self, right_candidate_fs, max_distance):
         """
-        Return True if featSig interval is within 500kb of self (the promoter)
-        Param dhs_interval: vector [chrom,start,end] and distance (interger)
+        Return True if right_candidate_fs interval is within 500kb of self
+        Param max_distance: the (half) size of the neighborhood (interger)
         Return: bolean value.
         """
         pos1 = self.center
@@ -151,6 +157,14 @@ class FeatureSignal(GenomeFeature):
 
 
 def ValidEntry(chrom, start, end, values, num_signals):
+    """
+    Returns true if the genome feature signal is elligible for correlation
+    computation:
+      - start < end,
+      - values are not all zeros
+      - at least one value different from the orhters
+      - required number of values
+    """
     if start < 0 or start >= end:
         return False
     if np.count_nonzero(values) == 0:
@@ -195,13 +209,54 @@ def read_signal_file(signal_file, chromosome="all", log_transform=False,
     return all_signals
 
 
+# def write_header(output_fh):
+#     """
+#     Simply write the header using the output_fh handler
+#     """
+#     header_line = "\t".join(["#chr", "start", "end", "ID",
+#                              "chr", "start", "end", "ID",
+#                              "pearson_r", "spearman_r"]) + "\n"
+#     output_fh.write(header_line)
+
+
+def dump_correlations(correlations, output_fh):
+    """
+    Dump correlations with associated genome feature coordinates and name
+    """
+    # all_feature_signals is a global variable
+    for pair, corr in correlations:
+        i, j = pair
+        pea_r, spea_r = corr
+        fs1 = all_feature_signals[i]
+        fs2 = all_feature_signals[j]
+        output_fh.write("%s\t%s\t%5.4f\t%5.4f\n" % (fs1, fs2, pea_r, spea_r))
+
+
+def sort_and_write(tmp_file, output_file):
+    """
+    Sort, using unix sort, the signa features and append to the output file
+    """
+    header_line = "\t".join(["#chr", "start", "end", "ID",
+                             "chr", "start", "end", "ID",
+                             "pearson_r", "spearman_r"]) + "\n"
+    with open(output_file, "w") as fout:
+        fout.write(header_line)
+    cmd = "sort -k 1,1V -k 2,2n -k 5,5V -k 6,6n " + tmp_file + " >> " + output_file
+    os.system(cmd)
+
+
 def write_correlations(correlations, all_values):
+    """
+    Write correlations to stdout
+    """
 
     header = "\t".join(["#chr", "start", "end", "ID",
                         "chr", "start", "end", "ID",
                         "pearson_r", "spearman_r"])
     print(header)
-    for i, j, pea_r, spea_r in correlations:
+    for pair, corr in correlations:
+        i, j = pair
+        pea_r, spea_r = corr
         fs1 = all_values[i]
         fs2 = all_values[j]
         print("%s\t%s\t%5.4f\t%5.4f" % (fs1, fs2, pea_r, spea_r))
@@ -260,7 +315,29 @@ def parallel_correlations(args):
     for j in range(start+1, end+1):
         pear_r, spea_r = compute_correlation(values, ranks,  i, j)
         correlations.append(((i, j), (pear_r, spea_r)))
+    return correlations
 
+
+def parallel_correlations_pairs(pairs):
+    """
+    Compute all the correlations of the Dhs in start from
+    start+1 to end.
+    Param: to_compute with the windows border index for each Dhs.
+    Return: list of the correlation coefficient.
+    """
+
+    # Warning is necessary because of the use of global variables
+    # in parallelization mode
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', RuntimeWarning)
+        values = np.ctypeslib.as_array(values_global)
+        ranks = np.ctypeslib.as_array(ranks_global)
+
+    correlations = []
+    for p in pairs:
+        i, j = p
+        pear_r, spea_r = compute_correlation(values, ranks,  i, j)
+        correlations.append(((i, j), (pear_r, spea_r)))
     return correlations
 
 
@@ -271,11 +348,20 @@ def _init_parallel(values_to_populate, ranks_to_populate):
     """
     global values_global
     global ranks_global
+
     values_global = values_to_populate
     ranks_global = ranks_to_populate
 
 
-def parallel_computation(values, ranks, to_compute, threads=1):
+def grouping(n, iterable):
+    """
+    Group the iterable by chunks of n
+    """
+    args = [iter(iterable)] * n
+    return ([e for e in t if e is not None] for t in itertools.zip_longest(*args))
+
+
+def parallel_computation(values, ranks, to_compute, output_file, threads=1):
     """
     Create shared variables and pool for multiprocessing.
     Params: logcounts and sigma numpy array, to_compute list with the index and
@@ -296,27 +382,37 @@ def parallel_computation(values, ranks, to_compute, threads=1):
     tmp_ranks = np.ctypeslib.as_ctypes(ranks)
     shared_ranks = sharedctypes.Array(tmp_ranks._type_, tmp_ranks,
                                       lock=False)
+    # results = []
+    temp_file = tempfile.NamedTemporaryFile(delete=False)
+    with open(temp_file.name, "w") as temp_fh:
+        with Pool(processes=threads, initializer=_init_parallel,
+                  initargs=(shared_values, shared_ranks, )) as pool:
+            #     controls a pool of worker processes
+            #     processes: number of worker processes to use
+            #     initializer is not None: each worker process will
+            #     call initializer(*initargs)
 
-    pool = Pool(processes=threads, initializer=_init_parallel,
-                initargs=(shared_values, shared_ranks, ))
-    #                       controls a pool of worker processes
-    #                       processes: number of worker processes to use
-    #                       initializer is not None: each worker process will
-    #                       call initializer(*initargs)
-    result = pool.map(parallel_correlations, to_compute)
-    #                       supports only one iterable argument,
-    #                       blocks until the result is ready
+            #     we split the elements to compute in batchs of size
+            num_pass = 0
+            for group_to_compute in grouping(50000, to_compute):
+                num_pass += 1
+                eprint("Pass %d" % num_pass)
+                nested_result = pool.map(parallel_correlations, group_to_compute, 100)
+                #     supports only one iterable argument,
+                #                       blocks until the result is ready
+                result = [item for sublist in nested_result for item in sublist]
+                dump_correlations(result, temp_fh)
+                # results.extend(result)
+    sort_and_write(temp_file.name,  output_file)
 
-    results = [item for sublist in result for item in sublist]
-    return results
+    return 0
 
 
-def sort_correlations(correlations, all_dhs):
+def sort_correlations(correlations):
     """
     Sort the result from multiprocessing and add the data corresponding to each
     coefficient.
-    Params: list with index and correlation coefficient and list of all the
-    object Dhs
+    Params: the correlations
     Result: sorted numpy array with the results to print.
     """
     results = []
@@ -328,8 +424,8 @@ def sort_correlations(correlations, all_dhs):
     return results
 
 
-def _within_neighborhood(all_values_A, all_values_B,
-                         max_distance=500000, mode="all2all"):
+def _within_neighborhood(all_values_A, all_values_B=None,
+                         max_distance=500000):
     """
     Identify the pairs verifying the distance constraints hence the pairs
     for whixh a correlation will be computed
@@ -372,7 +468,7 @@ def _peer2peer(all_values_A, all_values_B):
     return to_compute, all_values
 
 
-def get_pairs_tocompare(all_values, all_values_B,
+def get_pairs_tocompare(all_values, all_values_B=None,
                         max_distance=500000, mode="all2all"):
     """
     Identify the pairs verifying the distance constraints hence the pairs
@@ -382,31 +478,35 @@ def get_pairs_tocompare(all_values, all_values_B,
 
     if mode == "all2all" or mode == "A2B":
         to_compute = _within_neighborhood(all_values, all_values_B,
-                                          max_distance=max_distance, mode=mode)
+                                          max_distance=max_distance)
     elif mode == "L2L":
         to_compute = _peer2peer(all_values, all_values_B)
 
     return to_compute
 
 
-def compute_all_correlations(all_values, to_compute, threads=1):
+def compute_all_correlations(all_values, to_compute, output_file, threads=1):
     (values, ranks) = arraytonumpy(all_values)
-    output = parallel_computation(values, ranks, to_compute, threads=threads)
+    output = parallel_computation(values, ranks, to_compute, output_file,
+                                  threads=threads)
     return output
 
 
 if __name__ == '__main__':
     # Input from command line.
-    parser = ap.ArgumentParser(description="Compute Dnase correlations from a "
-                               "file in bed-like format: \n "
-                               " chr start end name val1 val2...\n"
-                               "\nWarning, the file has to be sorted "
-                               "(using sort -k1,1 -k2,2n)",
+    parser = ap.ArgumentParser(description="Compute pearson and spearman "
+                               "correlations between \n"
+                               "feature signals. \n"
+                               "Correlations are computed bewteen features "
+                               "separated \n"
+                               "by at most max_distance bp "
+                               "(default 500kb)\n\n"
+                               "The feature signal file mus be in the "
+                               "following format:\n"
+                               " chr start end name val1 val2...\n",
                                formatter_class=ap.RawTextHelpFormatter)
-    parser.add_argument("-a", dest="signal_file", required=True,
-                        help="file with the feature signals")
-    parser.add_argument("-b", dest="signal_file_B", default=None,
-                        help="optionnal second file with the feature signals")
+    parser.add_argument("signal_file", help="file with the feature signals")
+    parser.add_argument("-o", "--output", help="output file", required=True)
     parser.add_argument("-c", "--chrom",
                         help="a single chromosome (default:all chromosomes)",
                         default="all", type=str)
@@ -422,42 +522,32 @@ if __name__ == '__main__':
                              "file a to file b (A2B), line pairs (L2L) "
                              "(default:all2all)",
                         default="all2all", type=str)
+
     parser.add_argument("-t", "--threads", help="number of prcessors"
                         " (default:1)",
                         default=1, type=int)
     args = parser.parse_args()
 
     signal_file = args.signal_file
+    output_file = args.output
     chrom = args.chrom
     max_distance = args.max_distance
     log_transform = args.log_transform
     mode = args.mode
     threads = args.threads
 
+    global all_feature_signals
+
     eprint("Reading signal file")
     all_feature_signals = read_signal_file(signal_file, chrom, log_transform)
     eprint("%d peaks loaded from file" % (len(all_feature_signals)))
 
-    if args.signal_file_B:
-        eprint("Reading second signal file")
-        signal_file_B = args.signal_file_B
-        all_feature_signals_B = read_signal_file(signal_file_B, chrom,
-                                                 log_transform, group="B")
-        eprint("%d peaks loaded from second file " % (len(all_feature_signals_B)))
-    else:
-        all_feature_signals_B = None
-
     eprint("Identifying correlation pairs to compute")
-    to_compute, all_feature_signals = get_pairs_tocompare(all_feature_signals, all_feature_signals_B,
-                                     max_distance=max_distance, mode=mode)
+    to_compute, all_feature_signals = get_pairs_tocompare(all_feature_signals,
+                                                          max_distance=max_distance,
+                                                          mode=mode)
 
-    #eprint("Computing %d correlations" % len(to_compute))
-    eprint("Computing correlations")
+    eprint("Computing %d correlation intervals" % len(to_compute))
     output = compute_all_correlations(all_feature_signals, to_compute,
+                                      output_file,
                                       threads=threads)
-
-    eprint("Sorting the correlations")
-    sorted_correlations = sort_correlations(output, all_feature_signals)
-
-    eprint("Writing the correlations")
-    write_correlations(sorted_correlations, all_feature_signals)
