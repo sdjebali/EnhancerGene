@@ -392,7 +392,7 @@ def parallel_computation(values, ranks, to_compute, output_file, threads=1):
             #     initializer is not None: each worker process will
             #     call initializer(*initargs)
 
-            #     we split the elements to compute in batchs of size
+            #     we split the elements to compute in batchs of size 50000
             num_pass = 0
             for group_to_compute in grouping(50000, to_compute):
                 num_pass += 1
@@ -402,7 +402,7 @@ def parallel_computation(values, ranks, to_compute, output_file, threads=1):
                 #                       blocks until the result is ready
                 result = [item for sublist in nested_result for item in sublist]
                 dump_correlations(result, temp_fh)
-                # results.extend(result)
+
     sort_and_write(temp_file.name,  output_file)
 
     return 0
