@@ -83,6 +83,9 @@ class FeatureSignal(GenomeFeature):
         self.sigma = np.std(self.raw_x, ddof=1)
         self._std_values = np.array([i-self.mean for i in self.raw_x])/self.sigma
 
+    def as_string_no_group(self):
+        return ("%s\t%s\t%s\t%s" % (self.chrom, self.start, self.end,
+                                    self.name))
     def __str__(self):
         return ("%s\t%s\t%s\t%s\t%s" % (self.chrom, self.start, self.end,
                                     self.name, self.group))
@@ -321,7 +324,7 @@ def read_signal_file(signal_file, signal_file_B=None, chromosome="all",
     return all_signals
 
 
-def dump_correlations(correlations, output_fh):
+def dump_correlations(correlations, output_fh, mode):
     """
     Dump correlations with associated genome feature coordinates and name
     """
@@ -331,19 +334,35 @@ def dump_correlations(correlations, output_fh):
         pea_r, spea_r = corr
         fs1 = feature_signals[i]
         fs2 = feature_signals[j]
-        output_fh.write("%s\t%s\t%5.4f\t%5.4f\n" % (fs1, fs2, pea_r, spea_r))
+        if mode == "all2all":
+            fs1_str = fs1.as_string_no_group()
+            fs2_str = fs2.as_string_no_group()
+        else:
+            fs1_str = str(fs1)
+            fs2_str = str(fs2)
+        output_fh.write("%s\t%s\t%5.4f\t%5.4f\n" % (fs1_str, fs2_str,
+                                                    pea_r, spea_r))
 
 
-def sort_and_write(tmp_file, output_file):
+def sort_and_write(tmp_file, output_file, mode):
     """
     Sort, using unix sort, the signa features and append to the output file
     """
-    header_line = "\t".join(["#chr", "start", "end", "ID", "group"
-                             "chr", "start", "end", "ID", "group"
-                             "pearson_r", "spearman_r"]) + "\n"
+    if mode == "all2all":
+        header_line = "\t".join(["#chr", "start", "end", "ID",
+                                 "chr", "start", "end", "ID",
+                                 "pearson_r", "spearman_r"]) + "\n"
+
+    else:
+        header_line = "\t".join(["#chr", "start", "end", "ID", "group",
+                                 "chr", "start", "end", "ID", "group",
+                                 "pearson_r", "spearman_r"]) + "\n"
     with open(output_file, "w") as fout:
         fout.write(header_line)
-    cmd = "sort -k 1,1V -k 2,2n -k 5,5V -k 6,6n " + tmp_file + " >> " + output_file
+    if mode == "all2all":
+        cmd = "sort -k 1,1V -k 2,2n -k 5,5V -k 6,6n " + tmp_file + " >> " + output_file
+    else:
+        cmd = "sort -k 1,1V -k 2,2n -k 6,6V -k 7,7n " + tmp_file + " >> " + output_file
     os.system(cmd)
 
 
@@ -402,9 +421,6 @@ def parallel_correlations(pairs, mode="all2all"):
     correlations = []
     if mode == "all2all":
         start, end = pairs
-
-        # Warning is necessary because of the use of global variables
-        # in parallelization mode
         i = start
         for j in range(start+1, end+1):
             pear_r, spea_r = compute_correlation(values, ranks,  i, j)
@@ -480,9 +496,9 @@ def parallel_computation(values, ranks, to_compute, output_file, threads=1,
                 #     supports only one iterable argument,
                 #                       blocks until the result is ready
                 result = [item for sublist in nested_result for item in sublist]
-                dump_correlations(result, temp_fh)
+                dump_correlations(result, temp_fh, mode)
 
-    sort_and_write(temp_file.name,  output_file)
+    sort_and_write(temp_file.name,  output_file, mode)
 
     return 0
 
@@ -607,8 +623,12 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if ((args.mode == "A2B" or args.mode == "L2L") and
-         args.signal_file_B is None):
-        eprint("In mode A2B por L2L a second signal file is mandatory")
+            args.signal_file_B is None):
+        eprint("In mode A2B or L2L a second signal file is mandatory")
+        exit(1)
+
+    if args.mode == "all2all" and args.signal_file_B is not None:
+        eprint("In mode all2all only a single file can be provided")
         exit(1)
 
     signal_file = args.signal_file
@@ -627,8 +647,7 @@ if __name__ == '__main__':
                                        chromosome=chrom,
                                        log_transform=log_transform,
                                        mode=mode)
-    eprint("%d total peaks loaded from file" % len(feature_signals) )
-
+    eprint("%d total peaks loaded from file" % len(feature_signals))
 
     eprint("Identifying correlation pairs to compute")
     to_compute, feature_signals = get_pairs_tocompare(feature_signals,
