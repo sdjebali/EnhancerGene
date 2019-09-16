@@ -110,13 +110,13 @@ parser.add_argument("fichier_arretes")
 args = parser.parse_args()
 
 sommets = []
-with open (args.fichier_sommets,"rb") as fichier:
+with open (args.fichier_sommets,"r") as fichier:
     sommet = csv.reader (fichier, delimiter ='\t')
     for line in sommet:
         sommets.append(line)
 
 adjacencies = []
-with open (args.fichier_arretes, "rb") as fichier2:
+with open (args.fichier_arretes, "r") as fichier2:
     arretes = csv.reader (fichier2, delimiter = '\t')
     for line in arretes:
         adjacencies.append(line)
