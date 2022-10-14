@@ -306,7 +306,7 @@ def read_signal_file(signal_file, signal_file_B=None, chromosome="all",
                                                  signal_file))
 
         if mode == "A2B" and signal_file_B is not None:
-            feature_signals_B = read_single_signal_file(signal_file_B, chrom,
+            feature_signals_B = read_single_signal_file(signal_file_B, chromosome,
                                                         log_transform,
                                                         group="B")
             eprint("%d peaks loaded from file %s" % (len(feature_signals_B),
@@ -387,7 +387,8 @@ def compute_correlation(values, rank, i, j):
     """
     pearson_r = pearsonr(values[i], values[j])
     spearman_r = spearmanr(rank[i], rank[j])
-    # pearson_ss = ss.pearsonr(values[i], values[j])
+    pearson_ss = ss.pearsonr(values[i], values[j])
+    print("%3.16f" % abs(pearson_ss[0] - pearson_r))
     return pearson_r, spearman_r
 
 
@@ -457,7 +458,7 @@ def parallel_computation(values, ranks, to_compute, output_file, threads=1,
     """
     Create shared variables and pool for multiprocessing.
     Params: logcounts and sigma numpy array, to_compute list with the index and
-    the number of processeurs to use.
+    the number of threads to use.
     Return: all the correlations and index
     """
     # Define the corresponding shared ctype arrays
@@ -582,8 +583,7 @@ def compute_all_correlations(all_values, to_compute, output_file, threads=1,
     return output
 
 
-if __name__ == '__main__':
-    # Input from command line.
+def parse_arguments():
     parser = ap.ArgumentParser(description="Compute pearson and spearman "
                                "correlations between \n"
                                "feature signals. \n"
@@ -631,17 +631,15 @@ if __name__ == '__main__':
         eprint("In mode all2all only a single file can be provided")
         exit(1)
 
-    signal_file = args.signal_file
-    signal_file_B = args.signal_file_B
-    output_file = args.output
-    chrom = args.chrom
-    max_distance = args.max_distance
-    log_transform = args.log_transform
-    mode = args.mode
-    threads = args.threads
+    return args
+
+
+def main(signal_file, output, chrom, max_distance,
+         log_transform,  mode, threads, signal_file_B):
 
     global feature_signals
 
+    eprint(chrom)
     eprint("Reading signal file(s)")
     feature_signals = read_signal_file(signal_file, signal_file_B,
                                        chromosome=chrom,
@@ -656,6 +654,14 @@ if __name__ == '__main__':
 
     eprint("Computing %d correlation intervals" % len(to_compute))
     output = compute_all_correlations(feature_signals, to_compute,
-                                      output_file,
+                                      output,
                                       threads=threads,
                                       mode=mode)
+
+
+if __name__ == '__main__':
+    # Input from command line.
+    args = parse_arguments()
+
+    main(args.signal_file,  args.output, args.chrom, args.max_distance,
+         args.log_transform, args.mode, args.threads, args.signal_file_B)
